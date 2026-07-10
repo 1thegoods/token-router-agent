@@ -1,0 +1,7 @@
+__pycache__/
+venv/
+.env
+chats.json
+uploads/
+*.pyc
+.DS_Store

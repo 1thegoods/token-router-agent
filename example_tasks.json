@@ -1,0 +1,42 @@
+[
+  {
+    "id": "trivial_greeting",
+    "prompt": "Hello, how are you?"
+  },
+  {
+    "id": "easy_factual",
+    "prompt": "What is the capital of France?"
+  },
+  {
+    "id": "easy_math",
+    "prompt": "What is 17 * 23?"
+  },
+  {
+    "id": "medium_explanation",
+    "prompt": "Explain the difference between TCP and UDP protocols. Include when you would use each one."
+  },
+  {
+    "id": "medium_coding",
+    "prompt": "Write a Python function that finds the longest palindromic substring in a given string."
+  },
+  {
+    "id": "medium_summarization",
+    "prompt": "Summarize the key principles of object-oriented programming in 3-4 sentences."
+  },
+  {
+    "id": "hard_coding",
+    "prompt": "Implement a thread-safe LRU cache in Python that supports TTL (time-to-live) for entries. Include proper locking, eviction, and expiration logic."
+  },
+  {
+    "id": "hard_reasoning",
+    "prompt": "A farmer needs to cross a river with a wolf, a goat, and a cabbage. The boat can carry the farmer and only one item. If left alone, the wolf will eat the goat, and the goat will eat the cabbage. How does the farmer get everything across safely? Show your step-by-step reasoning."
+  },
+  {
+    "id": "easy_classification",
+    "prompt": "Classify the following sentence as positive, negative, or neutral: 'The weather today is absolutely wonderful and I feel great.'"
+  },
+  {
+    "id": "medium_extraction",
+    "prompt": "Extract all the dates, names, and locations from this text: 'On March 15, 2024, Dr. Sarah Chen presented her findings at the MIT conference in Cambridge, Massachusetts. Her colleague, Dr. James Wu from Stanford, co-authored the paper published on January 8, 2024.'"
+  }
+]
