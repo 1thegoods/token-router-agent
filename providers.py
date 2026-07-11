@@ -97,7 +97,7 @@ class OllamaProvider:
         try:
             r = requests.get(f"{self.base_url}/api/tags", timeout=3)
             return r.status_code == 200
-        except requests.ConnectionError:
+        except requests.RequestException:
             return False
 
     def list_models(self) -> list[str]:
