@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM --platform=linux/amd64 python:3.11-slim
 
 WORKDIR /app
 
@@ -9,16 +9,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Expose Flask port
+# Expose Flask port (for web mode)
 EXPOSE 5000
 
 # Set environment variables
 ENV FLASK_APP=app.py
 ENV FLASK_ENV=production
+ENV PYTHONUNBUFFERED=1
 
-# Make entrypoint executable and fix line endings
-RUN apt-get update && apt-get install -y dos2unix && rm -rf /var/lib/apt/lists/*
-RUN dos2unix entrypoint.sh && chmod +x entrypoint.sh
+# Fix line endings and make entrypoint executable
+RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
 
 # Run the application through the entrypoint
 ENTRYPOINT ["./entrypoint.sh"]

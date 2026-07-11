@@ -1,83 +1,313 @@
+"""
+Evaluation script for AMD Hackathon scoring harness.
+
+Self-contained: calls Fireworks API directly using environment variables
+injected by the evaluation platform. Does NOT depend on Ollama or any
+local model infrastructure.
+
+Contract:
+  - Reads tasks from /input/tasks.json
+  - Reads FIREWORKS_API_KEY, FIREWORKS_BASE_URL, ALLOWED_MODELS from env
+  - Writes results to /output/results.json
+  - Exits with code 0
+"""
+
 import os
 import json
 import sys
-import logging
+import re
 import time
+import logging
+import requests
+import concurrent.futures
 
-from config import load_config
-from multi_agent import AgenticSystem
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-def main():
-    # Paths configured by the hackathon evaluation harness
-    input_path = os.environ.get("TASKS_JSON_PATH", "/input/tasks.json")
-    output_path = os.environ.get("RESULTS_JSON_PATH", "/output/results.json")
+# ─── Configuration from environment ─────────────────────────────────────────
 
-    logger.info(f"Checking for tasks at: {input_path}")
-    if not os.path.exists(input_path):
-        logger.error(f"Input file not found at {input_path}")
-        sys.exit(1)
+FIREWORKS_API_KEY = os.environ.get("FIREWORKS_API_KEY", "")
+FIREWORKS_BASE_URL = os.environ.get(
+    "FIREWORKS_BASE_URL", "https://api.fireworks.ai/inference/v1"
+)
+ALLOWED_MODELS_RAW = os.environ.get("ALLOWED_MODELS", "")
 
-    logger.info("Loading tasks...")
+INPUT_PATH = os.environ.get("TASKS_JSON_PATH", "/input/tasks.json")
+OUTPUT_PATH = os.environ.get("RESULTS_JSON_PATH", "/output/results.json")
+
+# ─── Model tiers (cheapest first) ───────────────────────────────────────────
+
+# Ordered from cheapest to most expensive
+MODEL_TIERS = [
+    # Tier: TINY (cheapest)
+    "accounts/fireworks/models/llama-v3p2-1b-instruct",
+    "accounts/fireworks/models/llama-v3p2-3b-instruct",
+    # Tier: SMALL
+    "accounts/fireworks/models/llama-v3p1-8b-instruct",
+    "accounts/fireworks/models/llama4-scout-instruct-basic",
+    # Tier: MEDIUM
+    "accounts/fireworks/models/qwen2p5-72b-instruct",
+    "accounts/fireworks/models/llama-v3p1-70b-instruct",
+    "accounts/fireworks/models/deepseek-v3",
+    # Tier: LARGE
+    "accounts/fireworks/models/llama-v3p1-405b-instruct",
+    "accounts/fireworks/models/llama4-maverick-instruct-basic",
+]
+
+
+def parse_allowed_models() -> list[str]:
+    """Parse the ALLOWED_MODELS env var into a list of model IDs."""
+    if not ALLOWED_MODELS_RAW:
+        return []
+    # Could be comma-separated, JSON array, or newline-separated
+    raw = ALLOWED_MODELS_RAW.strip()
+    if raw.startswith("["):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+    # Try comma-separated
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
+
+def pick_models(allowed: list[str]) -> dict:
+    """
+    Pick a 'cheap' and 'strong' model from the allowed list.
+    Returns {"cheap": model_id, "strong": model_id}
+    """
+    if not allowed:
+        # Fallback: use known cheap/strong defaults
+        return {
+            "cheap": "accounts/fireworks/models/llama-v3p2-3b-instruct",
+            "strong": "accounts/fireworks/models/llama-v3p1-70b-instruct",
+        }
+
+    # Sort allowed models by our tier ordering
+    tier_order = {m: i for i, m in enumerate(MODEL_TIERS)}
+    sorted_models = sorted(
+        allowed,
+        key=lambda m: tier_order.get(m, 999)
+    )
+
+    return {
+        "cheap": sorted_models[0],
+        "strong": sorted_models[-1] if len(sorted_models) > 1 else sorted_models[0],
+    }
+
+
+# ─── Lightweight task classifier (no LLM needed) ────────────────────────────
+
+SIMPLE_PATTERNS = [
+    re.compile(r"\b(hello|hi|hey|greet|thanks|thank you)\b", re.I),
+    re.compile(r"\b(what is|define|who is|when was|where is)\b", re.I),
+    re.compile(r"\b(sentiment|classify|categorize|label)\b", re.I),
+    re.compile(r"\b(named entit|NER|extract names|extract entities)\b", re.I),
+    re.compile(r"\b(translate|convert .* to)\b", re.I),
+    re.compile(r"\b(true or false|yes or no)\b", re.I),
+    re.compile(r"\b(list|enumerate)\b", re.I),
+]
+
+HARD_PATTERNS = [
+    re.compile(r"\b(write .* code|implement|debug|fix .* bug|refactor)\b", re.I),
+    re.compile(r"\b(algorithm|complexity|big-?O|recursive)\b", re.I),
+    re.compile(r"\b(prove|theorem|mathematical|calculus|integral)\b", re.I),
+    re.compile(r"\b(explain .* detail|step.by.step|reason|logic|deduc)\b", re.I),
+    re.compile(r"\b(summar|synthesiz|analyz|compar|contrast|evaluat)\b", re.I),
+    re.compile(r"```", re.I),
+    re.compile(r"\b(python|javascript|java|rust|cpp|sql|html)\b", re.I),
+]
+
+
+def classify_task(prompt: str) -> str:
+    """Classify a task as 'simple' or 'hard' using regex heuristics."""
+    prompt_lower = prompt.lower()
+    word_count = len(prompt.split())
+
+    hard_score = sum(1 for p in HARD_PATTERNS if p.search(prompt))
+    simple_score = sum(1 for p in SIMPLE_PATTERNS if p.search(prompt))
+
+    # Long prompts or those with code blocks are likely complex
+    if word_count > 150 or "```" in prompt:
+        return "hard"
+
+    if hard_score > simple_score:
+        return "hard"
+
+    return "simple"
+
+
+# ─── Fireworks API caller ───────────────────────────────────────────────────
+
+def call_fireworks(
+    model: str,
+    prompt: str,
+    max_tokens: int = 1024,
+    temperature: float = 0.1,
+    timeout: int = 60,
+) -> dict:
+    """
+    Call the Fireworks AI API directly.
+    Returns {"answer": str, "input_tokens": int, "output_tokens": int, "model": str}
+    """
+    url = f"{FIREWORKS_BASE_URL}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {FIREWORKS_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful, accurate AI assistant. "
+                    "Answer concisely and directly. "
+                    "If asked to write code, provide working code. "
+                    "If asked to classify or extract, follow the format requested."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+
+    choice = data["choices"][0]
+    usage = data.get("usage", {})
+
+    return {
+        "answer": choice["message"]["content"],
+        "input_tokens": usage.get("prompt_tokens", 0),
+        "output_tokens": usage.get("completion_tokens", 0),
+        "model": model,
+    }
+
+
+# ─── Main evaluation loop ───────────────────────────────────────────────────
+
+def process_task(task: dict, models: dict, idx: int, total: int) -> dict:
+    """Process a single task. Never raises — always returns a result dict."""
+    task_id = task.get("task_id", f"task_{idx}")
+    prompt = task.get("prompt", "")
+
+    logger.info(f"[{idx}/{total}] Processing task {task_id}")
+    start = time.time()
+
     try:
-        with open(input_path, "r", encoding="utf-8") as f:
-            tasks = json.load(f)
+        difficulty = classify_task(prompt)
+        model = models["cheap"] if difficulty == "simple" else models["strong"]
+
+        # Use fewer tokens for simple tasks to save cost
+        max_tokens = 512 if difficulty == "simple" else 1536
+
+        logger.info(f"  → Classified as {difficulty}, routing to {model}")
+        result = call_fireworks(model, prompt, max_tokens=max_tokens)
+
+        elapsed = time.time() - start
+        logger.info(
+            f"  ✓ Done in {elapsed:.1f}s | "
+            f"tokens: {result['input_tokens']}in + {result['output_tokens']}out"
+        )
+
+        return {
+            "task_id": task_id,
+            "answer": result["answer"],
+        }
+
+    except requests.exceptions.Timeout:
+        logger.warning(f"  ✗ Timeout for task {task_id}")
+        return {"task_id": task_id, "answer": "Error: request timed out"}
+
+    except requests.exceptions.HTTPError as e:
+        logger.warning(f"  ✗ HTTP error for task {task_id}: {e}")
+        # Retry once with the cheap model if we were using strong
+        try:
+            fallback = models["cheap"]
+            logger.info(f"  ↻ Retrying with {fallback}")
+            result = call_fireworks(fallback, prompt, max_tokens=512)
+            return {"task_id": task_id, "answer": result["answer"]}
+        except Exception as e2:
+            logger.error(f"  ✗ Retry also failed: {e2}")
+            return {"task_id": task_id, "answer": f"Error: {e}"}
+
     except Exception as e:
-        logger.error(f"Failed to read tasks.json: {e}")
-        sys.exit(1)
+        logger.error(f"  ✗ Unexpected error for task {task_id}: {e}")
+        return {"task_id": task_id, "answer": f"Error: {e}"}
+
+
+def main():
+    logger.info("=" * 60)
+    logger.info("  AMD Hackathon Evaluation Runner")
+    logger.info("=" * 60)
+
+    # Validate environment
+    if not FIREWORKS_API_KEY:
+        logger.error("FIREWORKS_API_KEY not set!")
+        # Still write empty results and exit 0 to avoid INFRA_ERROR
+        os.makedirs(os.path.dirname(OUTPUT_PATH) or ".", exist_ok=True)
+        with open(OUTPUT_PATH, "w") as f:
+            json.dump([], f)
+        sys.exit(0)
+
+    logger.info(f"API Base URL: {FIREWORKS_BASE_URL}")
+    logger.info(f"Input path:   {INPUT_PATH}")
+    logger.info(f"Output path:  {OUTPUT_PATH}")
+
+    # Parse allowed models
+    allowed = parse_allowed_models()
+    if allowed:
+        logger.info(f"Allowed models ({len(allowed)}): {allowed}")
+    else:
+        logger.info("No ALLOWED_MODELS specified — using defaults")
+
+    models = pick_models(allowed)
+    logger.info(f"Cheap model:  {models['cheap']}")
+    logger.info(f"Strong model: {models['strong']}")
+
+    # Read tasks
+    if not os.path.exists(INPUT_PATH):
+        logger.error(f"Input file not found: {INPUT_PATH}")
+        os.makedirs(os.path.dirname(OUTPUT_PATH) or ".", exist_ok=True)
+        with open(OUTPUT_PATH, "w") as f:
+            json.dump([], f)
+        sys.exit(0)
+
+    with open(INPUT_PATH, "r", encoding="utf-8") as f:
+        tasks = json.load(f)
 
     if not isinstance(tasks, list):
-        logger.error("Expected tasks.json to be a list of task objects.")
-        sys.exit(1)
+        logger.error("tasks.json is not a list")
+        os.makedirs(os.path.dirname(OUTPUT_PATH) or ".", exist_ok=True)
+        with open(OUTPUT_PATH, "w") as f:
+            json.dump([], f)
+        sys.exit(0)
 
-    logger.info(f"Loaded {len(tasks)} tasks.")
+    logger.info(f"Loaded {len(tasks)} tasks")
 
-    # Initialize the Agent
-    logger.info("Initializing AgenticSystem...")
-    config = load_config()
-    agent_sys = AgenticSystem(config)
-
+    # Process tasks sequentially (safer for scoring, avoids rate limits)
     results = []
-
     for idx, task in enumerate(tasks, 1):
-        task_id = task.get("task_id", f"task_{idx}")
-        prompt = task.get("prompt", "")
-
-        logger.info(f"--- Processing Task {idx}/{len(tasks)} (ID: {task_id}) ---")
-        start_time = time.time()
-        
-        try:
-            # Route and process task
-            completion = agent_sys.run_task(prompt=prompt)
-            answer = completion.text
-        except Exception as e:
-            logger.error(f"Error processing task {task_id}: {e}")
-            answer = f"Error: {e}"
-
-        elapsed = time.time() - start_time
-        logger.info(f"Finished task {task_id} in {elapsed:.2f}s")
-
-        results.append({
-            "task_id": task_id,
-            "answer": answer
-        })
+        result = process_task(task, models, idx, len(tasks))
+        results.append(result)
 
     # Write output
-    logger.info(f"Writing results to {output_path}")
-    out_dir = os.path.dirname(output_path)
+    out_dir = os.path.dirname(OUTPUT_PATH)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    try:
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2)
-    except Exception as e:
-        logger.error(f"Failed to write results.json: {e}")
-        sys.exit(1)
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
 
+    logger.info(f"Wrote {len(results)} results to {OUTPUT_PATH}")
     logger.info("Evaluation complete!")
+
 
 if __name__ == "__main__":
     main()
