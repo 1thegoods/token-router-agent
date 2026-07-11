@@ -16,5 +16,9 @@ EXPOSE 5000
 ENV FLASK_APP=app.py
 ENV FLASK_ENV=production
 
-# Run the application
-CMD ["python", "app.py"]
+# Make entrypoint executable and fix line endings
+RUN apt-get update && apt-get install -y dos2unix && rm -rf /var/lib/apt/lists/*
+RUN dos2unix entrypoint.sh && chmod +x entrypoint.sh
+
+# Run the application through the entrypoint
+ENTRYPOINT ["./entrypoint.sh"]
