@@ -160,10 +160,6 @@ def call_fireworks(
     payload = {
         "model": model,
         "messages": [
-            {
-                "role": "system",
-                "content": "Answer directly. Be concise. Provide only what is requested."
-            },
             {"role": "user", "content": prompt},
         ],
         "max_tokens": max_tokens,
@@ -197,10 +193,15 @@ def process_task(task: dict, models: dict, idx: int, total: int) -> dict:
 
     try:
         difficulty = classify_task(prompt)
-        model = models["cheap"] if difficulty == "simple" else models["strong"]
-
-        # Use fewer tokens for simple tasks to save cost
-        max_tokens = 512 if difficulty == "simple" else 1536
+        if difficulty == "simple":
+            model = models["cheap"]
+            # Aggressive limit for simple tasks (NER, sentiment, basic Q&A)
+            max_tokens = 64
+            # Prompt engineering to guarantee short outputs without a system message
+            prompt = prompt + "\n\n(Answer directly in 1-5 words. No explanation.)"
+        else:
+            model = models["strong"]
+            max_tokens = 512
 
         logger.info(f"  → Classified as {difficulty}, routing to {model}")
         result = call_fireworks(model, prompt, max_tokens=max_tokens)
