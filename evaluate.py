@@ -139,6 +139,27 @@ def classify_task(prompt: str) -> str:
     return "simple"
 
 
+# ─── Local Solvers (0 Tokens) ───────────────────────────────────────────────
+
+def solve_math_locally(prompt: str) -> str | None:
+    """Solve simple binary math operations without an API."""
+    prompt_clean = prompt.lower().replace("what is", "").replace("calculate", "").replace("solve", "").replace("?", "").strip()
+    # Match basic expressions like 5 + 3 or 10.5 * 2
+    match = re.search(r"^([\d\.]+)\s*([\+\-\*\/])\s*([\d\.]+)$", prompt_clean)
+    if match:
+        num1, op, num2 = match.groups()
+        try:
+            n1 = float(num1) if '.' in num1 else int(num1)
+            n2 = float(num2) if '.' in num2 else int(num2)
+            if op == '+': return str(n1 + n2)
+            if op == '-': return str(n1 - n2)
+            if op == '*': return str(n1 * n2)
+            if op == '/': return str(n1 / n2) if n2 != 0 else None
+        except Exception:
+            return None
+    return None
+
+
 # ─── Fireworks API caller ───────────────────────────────────────────────────
 
 def call_fireworks(
@@ -196,6 +217,18 @@ def process_task(task: dict, models: dict, idx: int, total: int) -> dict:
     start = time.time()
 
     try:
+        # 1. Try local zero-token solvers first
+        local_answer = solve_math_locally(prompt)
+        if local_answer is not None:
+            logger.info(f"  → Solved locally! 0 tokens used.")
+            elapsed = time.time() - start
+            logger.info(f"  ✓ Done in {elapsed:.1f}s | tokens: 0in + 0out")
+            return {
+                "task_id": task_id,
+                "answer": local_answer,
+            }
+
+        # 2. Fallback to API routing
         difficulty = classify_task(prompt)
         model = models["cheap"] if difficulty == "simple" else models["strong"]
 
@@ -288,8 +321,20 @@ def main():
 
     # Process tasks sequentially (safer for scoring, avoids rate limits)
     results = []
+    cache = {}
     for idx, task in enumerate(tasks, 1):
+        prompt = task.get("prompt", "")
+        task_id = task.get("task_id", f"task_{idx}")
+        
+        # Check cache for exact duplicate prompts (0 tokens)
+        if prompt in cache:
+            logger.info(f"[{idx}/{len(tasks)}] Processing task {task_id}")
+            logger.info("  → Found in cache! 0 tokens used.")
+            results.append({"task_id": task_id, "answer": cache[prompt]})
+            continue
+
         result = process_task(task, models, idx, len(tasks))
+        cache[prompt] = result["answer"]
         results.append(result)
 
     # Write output
