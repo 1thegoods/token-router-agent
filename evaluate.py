@@ -162,12 +162,7 @@ def call_fireworks(
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "You are a helpful, accurate AI assistant. "
-                    "Answer concisely and directly. "
-                    "If asked to write code, provide working code. "
-                    "If asked to classify or extract, follow the format requested."
-                ),
+                "content": "Answer directly. Be concise. Provide only what is requested."
             },
             {"role": "user", "content": prompt},
         ],
