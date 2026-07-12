@@ -46,7 +46,7 @@ INPUT_PATH = os.environ.get("TASKS_JSON_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("RESULTS_JSON_PATH", "/output/results.json")
 
 LOCAL_MODEL_PATH = os.environ.get(
-    "LOCAL_MODEL_PATH", "/app/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
+    "LOCAL_MODEL_PATH", "/app/models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
 )
 
 # ─── Model tiers for API fallback (cheapest first) ──────────────────────────
