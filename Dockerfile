@@ -2,9 +2,19 @@ FROM --platform=linux/amd64 python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+# Install build dependencies for llama-cpp-python
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Download the GGUF model (~1.93 GB)
+RUN mkdir -p /app/models && \
+    curl -L -o /app/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf \
+    "https://huggingface.co/bartowski/Qwen2.5-3B-Instruct-GGUF/resolve/main/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
 
 # Copy application code
 COPY . .
