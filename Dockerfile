@@ -11,10 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download the GGUF model (~0.99 GB)
+# Download the GGUF model (~0.39 GB)
 RUN mkdir -p /app/models && \
-    curl -L -o /app/models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf \
-    "https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
+    curl -L -o /app/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf \
+    "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
 
 # Copy application code
 COPY . .

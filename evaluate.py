@@ -46,7 +46,7 @@ INPUT_PATH = os.environ.get("TASKS_JSON_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("RESULTS_JSON_PATH", "/output/results.json")
 
 LOCAL_MODEL_PATH = os.environ.get(
-    "LOCAL_MODEL_PATH", "/app/models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
+    "LOCAL_MODEL_PATH", "/app/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
 )
 
 # ─── Model tiers for API fallback (cheapest first) ──────────────────────────
@@ -165,7 +165,7 @@ def init_local_model():
         logger.warning(f"Model file not found: {LOCAL_MODEL_PATH}")
         return None
     try:
-        n_threads = max(1, (os.cpu_count() or 4) // 2)
+        n_threads = max(1, os.cpu_count() or 4)
         logger.info(f"Loading local model: {LOCAL_MODEL_PATH} ({n_threads} threads)")
         llm = Llama(
             model_path=LOCAL_MODEL_PATH,
@@ -266,7 +266,7 @@ def process_task(
         # ── Step 2: Try local LLM (0 tokens) ──
         if local_llm is not None:
             difficulty = classify_task(prompt)
-            max_tokens = 256 if difficulty == "simple" else 512
+            max_tokens = 128 if difficulty == "simple" else 256
             logger.info(f"  → Local model (difficulty={difficulty})...")
             answer = call_local_model(local_llm, prompt, max_tokens=max_tokens)
             if answer is not None:
