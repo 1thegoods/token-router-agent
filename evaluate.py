@@ -165,7 +165,7 @@ def init_local_model():
         logger.warning(f"Model file not found: {LOCAL_MODEL_PATH}")
         return None
     try:
-        n_threads = max(1, os.cpu_count() or 4)
+        n_threads = 4
         logger.info(f"Loading local model: {LOCAL_MODEL_PATH} ({n_threads} threads)")
         llm = Llama(
             model_path=LOCAL_MODEL_PATH,
