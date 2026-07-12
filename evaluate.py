@@ -181,7 +181,7 @@ def init_local_model():
 
 
 def call_local_model(llm, prompt: str, max_tokens: int = 256) -> str | None:
-    """Run inference on the local model. Returns answer string or None."""
+    """Run inference on the local model. Returns answer string or None if fallback needed."""
     try:
         response = llm.create_chat_completion(
             messages=[
@@ -194,10 +194,28 @@ def call_local_model(llm, prompt: str, max_tokens: int = 256) -> str | None:
             max_tokens=max_tokens,
             temperature=0.1,
         )
-        answer = response["choices"][0]["message"]["content"]
-        if answer and answer.strip():
-            return answer.strip()
-        return None
+        choice = response["choices"][0]
+        answer = choice["message"]["content"]
+        finish_reason = choice.get("finish_reason", "stop")
+
+        if not answer or not answer.strip():
+            return None
+            
+        answer_clean = answer.strip()
+        
+        # Fallback if the model ran out of tokens (cut off)
+        if finish_reason == "length":
+            logger.warning("  ⚠ Local model cut off (length) — triggering fallback")
+            return None
+            
+        # Fallback if the model is confused or refuses to answer
+        lower_ans = answer_clean.lower()
+        refusals = ["i don't know", "i do not know", "i cannot", "i can't", "as an ai", "as a language model", "i'm sorry"]
+        if any(r in lower_ans for r in refusals):
+            logger.warning("  ⚠ Local model refused/confused — triggering fallback")
+            return None
+            
+        return answer_clean
     except Exception as e:
         logger.error(f"Local model inference error: {e}")
         return None
