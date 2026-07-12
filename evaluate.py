@@ -1,11 +1,10 @@
 """
 Evaluation script for AMD Hackathon scoring harness.
 
-Hybrid zero-token approach:
+Token-efficient approach:
   1. Local math solver         → 0 tokens
   2. Prompt cache (duplicates) → 0 tokens
-  3. Local Qwen2.5-3B GGUF    → 0 tokens
-  4. Fireworks API fallback    → tokens (only if local model fails)
+  3. Fireworks API (cheap/strong routing) → tokens
 
 Contract:
   - Reads tasks from /input/tasks.json
@@ -20,13 +19,6 @@ import re
 import time
 import logging
 import requests
-
-# Try to import llama_cpp for local inference
-try:
-    from llama_cpp import Llama
-    LLAMA_CPP_AVAILABLE = True
-except ImportError:
-    LLAMA_CPP_AVAILABLE = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,11 +37,7 @@ ALLOWED_MODELS_RAW = os.environ.get("ALLOWED_MODELS", "")
 INPUT_PATH = os.environ.get("TASKS_JSON_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("RESULTS_JSON_PATH", "/output/results.json")
 
-LOCAL_MODEL_PATH = os.environ.get(
-    "LOCAL_MODEL_PATH", "/app/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
-)
-
-# ─── Model tiers for API fallback (cheapest first) ──────────────────────────
+# ─── Model tiers (cheapest first) ───────────────────────────────────────────
 
 MODEL_TIERS = [
     "accounts/fireworks/models/llama-v3p2-1b-instruct",
@@ -154,74 +142,7 @@ def solve_math_locally(prompt: str) -> str | None:
     return None
 
 
-# ─── Local Model (0 Tokens) ─────────────────────────────────────────────────
-
-def init_local_model():
-    """Load the local GGUF model. Returns Llama instance or None."""
-    if not LLAMA_CPP_AVAILABLE:
-        logger.warning("llama-cpp-python not installed — skipping local model")
-        return None
-    if not os.path.exists(LOCAL_MODEL_PATH):
-        logger.warning(f"Model file not found: {LOCAL_MODEL_PATH}")
-        return None
-    try:
-        n_threads = 4
-        logger.info(f"Loading local model: {LOCAL_MODEL_PATH} ({n_threads} threads)")
-        llm = Llama(
-            model_path=LOCAL_MODEL_PATH,
-            n_ctx=2048,
-            n_threads=n_threads,
-            verbose=False,
-        )
-        logger.info("Local model loaded successfully!")
-        return llm
-    except Exception as e:
-        logger.error(f"Failed to load local model: {e}")
-        return None
-
-
-def call_local_model(llm, prompt: str, max_tokens: int = 256) -> str | None:
-    """Run inference on the local model. Returns answer string or None if fallback needed."""
-    try:
-        response = llm.create_chat_completion(
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Answer directly. Be concise. Provide only what is requested."
-                },
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=max_tokens,
-            temperature=0.1,
-        )
-        choice = response["choices"][0]
-        answer = choice["message"]["content"]
-        finish_reason = choice.get("finish_reason", "stop")
-
-        if not answer or not answer.strip():
-            return None
-            
-        answer_clean = answer.strip()
-        
-        # Fallback if the model ran out of tokens (cut off)
-        if finish_reason == "length":
-            logger.warning("  ⚠ Local model cut off (length) — triggering fallback")
-            return None
-            
-        # Fallback if the model is confused or refuses to answer
-        lower_ans = answer_clean.lower()
-        refusals = ["i don't know", "i do not know", "i cannot", "i can't", "as an ai", "as a language model", "i'm sorry"]
-        if any(r in lower_ans for r in refusals):
-            logger.warning("  ⚠ Local model refused/confused — triggering fallback")
-            return None
-            
-        return answer_clean
-    except Exception as e:
-        logger.error(f"Local model inference error: {e}")
-        return None
-
-
-# ─── Fireworks API caller (fallback) ────────────────────────────────────────
+# ─── Fireworks API caller ───────────────────────────────────────────────────
 
 def call_fireworks(
     model: str,
@@ -263,9 +184,7 @@ def call_fireworks(
 
 # ─── Main evaluation loop ───────────────────────────────────────────────────
 
-def process_task(
-    task: dict, models: dict, idx: int, total: int, local_llm=None
-) -> dict:
+def process_task(task: dict, models: dict, idx: int, total: int) -> dict:
     """Process a single task. Never raises — always returns a result dict."""
     task_id = task.get("task_id", f"task_{idx}")
     prompt = task.get("prompt", "")
@@ -281,28 +200,16 @@ def process_task(
             logger.info(f"  → Solved with math solver! 0 tokens | {elapsed:.1f}s")
             return {"task_id": task_id, "answer": local_answer}
 
-        # ── Step 2: Try local LLM (0 tokens) ──
-        if local_llm is not None:
-            difficulty = classify_task(prompt)
-            max_tokens = 128 if difficulty == "simple" else 256
-            logger.info(f"  → Local model (difficulty={difficulty})...")
-            answer = call_local_model(local_llm, prompt, max_tokens=max_tokens)
-            if answer is not None:
-                elapsed = time.time() - start
-                logger.info(f"  ✓ Local model done in {elapsed:.1f}s | 0 tokens")
-                return {"task_id": task_id, "answer": answer}
-            logger.warning("  ⚠ Local model returned empty — falling back to API")
-
-        # ── Step 3: Fireworks API fallback ──
+        # ── Step 2: Fireworks API ──
         if not FIREWORKS_API_KEY:
-            logger.error("  ✗ No API key and local model failed")
+            logger.error("  ✗ No API key available")
             return {"task_id": task_id, "answer": "Error: no model available"}
 
         difficulty = classify_task(prompt)
         model = models["cheap"] if difficulty == "simple" else models["strong"]
         max_tokens = 512 if difficulty == "simple" else 1536
 
-        logger.info(f"  → API fallback: {model}")
+        logger.info(f"  → API: {model} (difficulty={difficulty})")
         result = call_fireworks(model, prompt, max_tokens=max_tokens)
 
         elapsed = time.time() - start
@@ -334,33 +241,24 @@ def process_task(
 
 def main():
     logger.info("=" * 60)
-    logger.info("  AMD Hackathon — Hybrid Zero-Token Router")
+    logger.info("  AMD Hackathon — Token-Efficient Router")
     logger.info("=" * 60)
 
-    # ── Initialize local model ──
-    local_llm = init_local_model()
-    if local_llm:
-        logger.info("✓ Local model ready — targeting 0 API tokens!")
-    else:
-        logger.info("⚠ No local model — will use Fireworks API")
-
-    # ── Check API fallback ──
+    # ── Check API key ──
     if not FIREWORKS_API_KEY:
-        if local_llm is None:
-            logger.error("No local model AND no API key!")
-            os.makedirs(os.path.dirname(OUTPUT_PATH) or ".", exist_ok=True)
-            with open(OUTPUT_PATH, "w") as f:
-                json.dump([], f)
-            sys.exit(0)
-        logger.info("No API key — running in pure local mode")
-    else:
-        logger.info(f"API fallback available: {FIREWORKS_BASE_URL}")
+        logger.error("No FIREWORKS_API_KEY set!")
+        os.makedirs(os.path.dirname(OUTPUT_PATH) or ".", exist_ok=True)
+        with open(OUTPUT_PATH, "w") as f:
+            json.dump([], f)
+        sys.exit(0)
 
-    # ── Parse allowed models for API fallback ──
+    logger.info(f"API endpoint: {FIREWORKS_BASE_URL}")
+
+    # ── Parse allowed models ──
     allowed = parse_allowed_models()
     models = pick_models(allowed)
-    logger.info(f"API cheap:  {models['cheap']}")
-    logger.info(f"API strong: {models['strong']}")
+    logger.info(f"Cheap model:  {models['cheap']}")
+    logger.info(f"Strong model: {models['strong']}")
 
     # ── Read tasks ──
     if not os.path.exists(INPUT_PATH):
@@ -395,7 +293,7 @@ def main():
             results.append({"task_id": task_id, "answer": cache[prompt]})
             continue
 
-        result = process_task(task, models, idx, len(tasks), local_llm=local_llm)
+        result = process_task(task, models, idx, len(tasks))
         cache[prompt] = result["answer"]
         results.append(result)
 
